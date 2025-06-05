@@ -15,7 +15,7 @@ from collections import defaultdict
 class Freq_Calculator:
     def __init__(self):
         parser = argparse.ArgumentParser()
-        parser.add_argument("-f", "--filename", help="Specifiy the Blast XML results input file.\n(required)", type=str, required=True)
+        parser.add_argument("-f", "--filename", help="Specify the Blast XML results input file.\n(required)", type=str, required=True)
         parser.add_argument("-wf", "--wholefreq", action='store_true', help='Calculate whole frequency of amino acids in the query sequence.')
         parser.add_argument("-e", "--external", action='store_true', help='Indica que o alinhamento é externo ao banco de dados e fornece o nome do arquivo XML gerado pelo novo blastp.')
         parser.add_argument("-p","--position", type=int, help='Posição específica para calcular a frequência', default=None)
