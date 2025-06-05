@@ -6,7 +6,7 @@ library(stats) # Para a função phyper()
 args <- commandArgs(trailingOnly = TRUE)
 
 if(length(args) < 1) {
-  stop("No phenotype specified as argument.\nUsage: Rscript your_script.R PhenotypeName")
+  stop("No phenotype specified as argument.\nUsage: Rscript hyper_script.R PhenotypeName")
 }
 
 phenotype <- args[1]
