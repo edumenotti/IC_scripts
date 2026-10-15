@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it, and cite Peter et al. 2018 for the data."
+title: mutation-hunter
+version: 2.0.0.dev0
+license: MIT
+repository-code: "https://github.com/edumenotti/IC_scripts"
+authors:
+  - family-names: Menoti Silva
+    given-names: Eduardo
+references:
+  - type: article
+    title: "Genome evolution across 1,011 Saccharomyces cerevisiae isolates"
+    authors:
+      - family-names: Peter
+        given-names: Jackson
+    journal: Nature
+    year: 2018
+    doi: 10.1038/s41586-018-0030-5

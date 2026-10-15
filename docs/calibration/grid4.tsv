@@ -1,0 +1,21 @@
+model	set	lambda_median	lambda_max	tail_1e-3	power_b1
+snp	snp_sim	1.03	2.31	1.82	
+snp	orf_sim	1.44	8.24	21.4	
+snp	both_sim	1.38	8.7	14.9	0.97
+snp	perm_k30	0.964	3.14	1.67	
+snp	real	1.68	10.5	27.1	
+snp+orfPC5	snp_sim	1.05	1.92	1.81	
+snp+orfPC5	orf_sim	1.19	2.33	4.34	
+snp+orfPC5	both_sim	1.06	5	7.49	0.97
+snp+orfPC5	perm_k30	1.02	1.98	1.47	
+snp+orfPC5	real	1.52	7.88	12.2	
+snp+orfPC10	snp_sim	1.03	1.73	1.37	
+snp+orfPC10	orf_sim	1.15	1.45	2.21	
+snp+orfPC10	both_sim	1.11	1.73	1.79	0.98
+snp+orfPC10	perm_k30	1.05	2.07	1.43	
+snp+orfPC10	real	1.36	3.32	7.63	
+snp+orfPC20	snp_sim	1.02	1.48	1.32	
+snp+orfPC20	orf_sim	1.16	1.79	2.27	
+snp+orfPC20	both_sim	1.1	1.61	1.68	0.96
+snp+orfPC20	perm_k30	1.07	1.85	1.84	
+snp+orfPC20	real	1.34	2.97	7.02	
