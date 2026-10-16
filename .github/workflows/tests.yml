@@ -13,3 +13,14 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[test]"
       - run: pytest -v
+  tools:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment.yml
+      - run: pytest -v

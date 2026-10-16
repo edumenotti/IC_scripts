@@ -6,3 +6,6 @@ work/
 .nextflow*
 results/
 *.npz
+panel*/
+*.bcf
+*.csi

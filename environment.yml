@@ -1,0 +1,13 @@
+# Maintainer environment: builds the panel and runs the tests that need bcftools.
+#   conda env create -f environment.yml && conda activate mutation-hunter-build
+name: mutation-hunter-build
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - bcftools=1.20
+  - nextflow
+  - pip
+  - pip:
+      - -e .[test,build]

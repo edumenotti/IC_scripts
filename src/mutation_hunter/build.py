@@ -364,3 +364,37 @@ def assemble(parts_dir, inputs_dir, reference_dir, strains_tsv, out, input_md5: 
     (tmp / "SHA256SUMS").write_text("".join(f"{file_hash(p, 'sha256')}  {p.relative_to(tmp)}\n" for p in files))
     shutil.rmtree(out, ignore_errors=True)
     tmp.rename(out)
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="python -m mutation_hunter.build", description=__doc__)
+    sub = p.add_subparsers(dest="step", required=True)
+    s = sub.add_parser("check-inputs"); s.add_argument("inputs")
+    s = sub.add_parser("reference"); s.add_argument("inputs"); s.add_argument("out")
+    s = sub.add_parser("strains"); s.add_argument("inputs"); s.add_argument("samples"); s.add_argument("out")
+    s = sub.add_parser("genotypes"); s.add_argument("bcf"); s.add_argument("strains"); s.add_argument("gff")
+    s.add_argument("out_prefix"); s.add_argument("--min-gq", type=int, default=20); s.add_argument("--min-dp", type=int, default=5)
+    s = sub.add_parser("assemble")
+    for a in ("parts", "inputs", "reference", "strains", "out"):
+        s.add_argument(a)
+    s.add_argument("--panel-version", required=True); s.add_argument("--params", default="{}")
+    a = p.parse_args(argv)
+    if a.step == "check-inputs":
+        print(json.dumps(check_inputs(a.inputs)))
+    elif a.step == "reference":
+        d = Path(a.inputs)
+        reference(d / "Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz", d / "Saccharomyces_cerevisiae.R64-1-1.115.gff3.gz", a.out)
+    elif a.step == "strains":
+        d = Path(a.inputs)
+        samples = Path(a.samples).read_text().split()
+        strain_table(d / "41586_2018_30_MOESM3_ESM.xls", samples, d / "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz").to_csv(a.out, sep="\t")
+    elif a.step == "genotypes":
+        genotypes(a.bcf, a.strains, a.gff, a.out_prefix, a.min_gq, a.min_dp)
+    else:
+        assemble(a.parts, a.inputs, a.reference, a.strains, a.out, check_inputs(a.inputs),
+                 {"panel_version": a.panel_version, **json.loads(a.params)})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
