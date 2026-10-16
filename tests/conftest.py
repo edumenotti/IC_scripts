@@ -86,3 +86,51 @@ def write_bed(prefix, dosage: np.ndarray, chroms: list[int], samples: list[str])
     pd.DataFrame({"c": chroms, "id": [f"rs{i}" for i in range(len(chroms))], "cm": 0, "pos": range(1, len(chroms) + 1),
                   "a1": "A", "a2": "G"}).to_csv(f"{prefix}.bim", sep="\t", header=False, index=False)
     open(f"{prefix}.fam", "w").write("".join(f"{s} {s} 0 0 0 -9\n" for s in samples))
+
+
+@pytest.fixture
+def store(tmp_path):
+    """Run build.assemble on hand-made per-chromosome parts; returns the store folder."""
+    n = len(STORE_STRAINS)
+    parts, inputs, ref = tmp_path / "parts", tmp_path / "inputs", tmp_path / "reference"
+    for d in (parts, inputs, ref):
+        d.mkdir()
+    var = {"chromosome1": [("YAL901W", 128, "missense", [0, 1, 2, 0, -1, 2]),
+                           ("YAL901W", 159, "lof", [2, 0, 0, 0, 0, 0])],
+           "chromosome2": [("YBL902C", 1273, "missense", [0, 0, 0, 1, 1, 0])]}
+    rng = np.random.default_rng(1)
+    for chrom, rows in var.items():
+        pd.DataFrame([{"chrom": chrom, "pos": pos, "ref": "G", "alt": "A", "old_rec": "", "gene": g,
+                       "transcript": g + "_mRNA", "consequence": c, "class": c, "aa_change": "", "aa_pos": 0,
+                       "protein_len": 99, **build.site_stats(np.array(code, np.int8))}
+                      for g, pos, c, code in rows], columns=build.VARIANT_COLUMNS).to_csv(
+            parts / f"{chrom}.variants.tsv.gz", sep="\t", index=False)
+        sparse.save_npz(parts / f"{chrom}.geno.npz", sparse.csr_matrix(np.array([r[3] for r in rows], np.int8)))
+        Z = rng.normal(size=(50, n))
+        np.savez(parts / f"{chrom}.kin.npz", zz=Z.T @ Z, m=50)
+    (ref / "ref.gff3").write_text(GFF)
+    (ref / "ref.fa").write_text(">chromosome1\nACGT\n")
+    (ref / "aliases.tsv").write_text("alias\tchrom\nI\tchromosome1\n")
+    strains = pd.DataFrame({"isolate": STORE_STRAINS, "ploidy": [2, 2, 2, 2, 1, 2]}, index=pd.Index(STORE_STRAINS, name="strain"))
+    strains.to_csv(tmp_path / "strains.tsv", sep="\t")
+
+    pheno = pd.DataFrame({"COND1": rng.normal(size=n)}, index=STORE_STRAINS)
+    (inputs / "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz").write_bytes(gzip.compress(pheno.to_csv(sep="\t").encode()))
+    cols = ["X1.EC1118_1F14_0012g", "X2.YAL901W", "X3.YAL005C_NumOfGenes_3"]
+    pa = pd.DataFrame([[1, 1, 1]] * n, index=pd.Index(STORE_STRAINS, name="STD_name"), columns=cols)
+    pa.iloc[4, 1] = 0
+    for name, m in (("genesMatrix_PresenceAbsence.tab.gz", pa), ("genesMatrix_CopyNumber.tab.gz", pa * 1.5)):
+        (inputs / name).write_bytes(gzip.compress(m.to_csv(sep="\t").encode()))
+    (inputs / "allORFs_pangenome.fasta.gz").write_bytes(
+        gzip.compress(b">1-EC1118_1F14_0012g\nATG\n>2-YAL901W\nATG\n>3-YAL005C_NumOfGenes_3\nATG\n"))
+    gw = tmp_path / "gw"
+    gw.mkdir()
+    write_bed(gw / "1011GWAS_matrix", np.array([[0, 1, 2, -1, 0, 2], [2, 2, 0, 0, 1, 1], [1, 0, 0, 0, 0, 0]]),
+              [1, 2, 17], STORE_STRAINS)
+    with tarfile.open(inputs / "1011GWASMatrix.tar.gz", "w:gz") as t:
+        for f in gw.iterdir():
+            t.add(f, arcname=f.name)
+
+    out = tmp_path / "panel"
+    build.assemble(parts, inputs, ref, tmp_path / "strains.tsv", out, {"fake": "md5"}, {"panel_version": "0.0.1-test"})
+    return out

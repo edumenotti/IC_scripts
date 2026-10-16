@@ -96,3 +96,44 @@ def test_read_plink_bed_roundtrip(tmp_path):
     write_bed(tmp_path / "x", dos, [1, 17], list("abcde"))
     bim, got = build.read_plink_bed(tmp_path / "x")
     assert got.tolist() == dos.tolist() and bim["chrom"].tolist() == [1, 17]
+
+
+def test_clone_groups():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(5, 400))
+    X[1] = X[0] + rng.normal(0, 0.001, 400)  # near-identical pair
+    K = X @ X.T / 400
+    g = build.clone_groups(K)
+    assert g[0] == g[1] and len(set(g)) == 4
+
+
+def test_assemble_store_layout(store):
+    m = json.loads((store / "manifest.json").read_text())
+    assert m["format"] == 1 and m["panel_version"] == "0.0.1-test" and m["counts"]["variant_rows"] == 3
+    var = pd.read_csv(store / "variants.tsv.gz", sep="\t")
+    assert var["gene"].tolist() == ["YAL901W", "YAL901W", "YBL902C"] and var["row"].tolist() == [0, 1, 2]
+    genes = pd.read_csv(store / "genes.tsv", sep="\t", index_col=0)
+    assert genes.loc["YAL901W", ["first", "last"]].tolist() == [0, 1] and genes.loc["YBL903W", "first"] == -1
+    assert genes.loc["YAL901W", "orf"] == "YAL901W"
+    assert np.load(store / "placement.npy").shape == (6, 2)  # chromosome 17 (CNV) rows dropped
+    assert sorted(p.name for p in (store / "kinship_loco").iterdir()) == ["chromosome1.npy", "chromosome2.npy"]
+    listed = {line.split("  ", 1)[1] for line in (store / "SHA256SUMS").read_text().splitlines()}
+    assert {"manifest.json", "genotypes/data.npy", "reference/ref.fa"} <= listed
+    assert not store.with_name("panel.part").exists()
+
+
+def test_assemble_rejects_strains_missing_from_matrices(store, tmp_path):
+    inputs = tmp_path / "inputs"
+    pa = pd.read_csv(inputs / "genesMatrix_PresenceAbsence.tab.gz", sep="\t", index_col=0).drop("S3")
+    (inputs / "genesMatrix_PresenceAbsence.tab.gz").write_bytes(gzip.compress(pa.to_csv(sep="\t").encode()))
+    with pytest.raises(ValueError, match="1 VCF strains missing"):
+        build.assemble(tmp_path / "parts", inputs, tmp_path / "reference", tmp_path / "strains.tsv", tmp_path / "p2",
+                       {}, {"panel_version": "x"})
+
+
+def test_assemble_is_byte_reproducible(store, tmp_path):
+    build.assemble(tmp_path / "parts", tmp_path / "inputs", tmp_path / "reference", tmp_path / "strains.tsv",
+                   tmp_path / "again", {"fake": "md5"}, {"panel_version": "0.0.1-test"})
+    differ = [line for line, other in zip((store / "SHA256SUMS").read_text().splitlines(),
+                                          (tmp_path / "again" / "SHA256SUMS").read_text().splitlines()) if line != other]
+    assert {line.split("  ")[1] for line in differ} <= {"manifest.json"}  # at most the creation time changes

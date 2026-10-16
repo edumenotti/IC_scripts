@@ -272,3 +272,95 @@ def read_plink_bed(prefix) -> tuple[pd.DataFrame, np.ndarray]:
     # PLINK codes: 0 hom A1, 1 missing, 2 het, 3 hom A2; count A1 copies.
     lut = np.array([2, -1, 1, 0], dtype=np.int8)
     return bim, lut[bits]
+
+
+def kinships(parts: list[Path]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """GRM over all chromosomes and leave-one-chromosome-out versions (float32)."""
+    zz = {p.name.split(".")[0]: np.load(p) for p in parts}
+    total, m = sum(z["zz"] for z in zz.values()), sum(int(z["m"]) for z in zz.values())
+    loco = {c: ((total - z["zz"]) / (m - int(z["m"]))).astype(np.float32) for c, z in zz.items()}
+    return (total / m).astype(np.float32), loco
+
+
+def clone_groups(K: np.ndarray, frac=0.01) -> np.ndarray:
+    """Connected components of strains whose GRM distance is below frac x the median distance."""
+    d = np.diag(K)[:, None] + np.diag(K)[None, :] - 2 * K
+    thr = frac * np.median(d[np.triu_indices(len(K), 1)])
+    return connected_components(sparse.csr_matrix(d < thr), directed=False)[1]
+
+
+def assemble(parts_dir, inputs_dir, reference_dir, strains_tsv, out, input_md5: dict, params: dict) -> None:
+    parts_dir, inputs, out = Path(parts_dir), Path(inputs_dir), Path(out)
+    tmp = out.with_name(out.name + ".part")
+    shutil.rmtree(tmp, ignore_errors=True)
+    (tmp / "genotypes").mkdir(parents=True)
+    chroms = [c for c in CHROMS if (parts_dir / f"{c}.variants.tsv.gz").exists()]
+    var = pd.concat([pd.read_csv(parts_dir / f"{c}.variants.tsv.gz", sep="\t", keep_default_na=False,
+                                 dtype={"old_rec": str, "aa_change": str}) for c in chroms], ignore_index=True)
+    geno = sparse.vstack([sparse.load_npz(parts_dir / f"{c}.geno.npz") for c in chroms], format="csr")
+    order = np.lexsort((var["alt"], var["pos"], var["gene"]))  # each gene becomes one contiguous block
+    var, geno = var.iloc[order].reset_index(drop=True), geno[order]
+    var.insert(0, "row", np.arange(len(var)))
+    var.to_csv(tmp / "variants.tsv.gz", sep="\t", index=False, compression={"method": "gzip", "mtime": 0})  # reproducible bytes
+    for name in ("data", "indices", "indptr"):
+        np.save(tmp / "genotypes" / f"{name}.npy", getattr(geno, name))
+    (tmp / "genotypes" / "shape.json").write_text(json.dumps(list(geno.shape)))
+
+    spans = gene_spans(Path(reference_dir) / "ref.gff3")
+    blocks = var.groupby("gene")["row"].agg(first="min", last="max")
+    genes = spans.join(blocks, how="left")
+    genes["first"], genes["last"] = genes["first"].fillna(-1).astype(int), genes["last"].fillna(-1).astype(int)
+
+    K, loco = kinships(sorted(parts_dir.glob("*.kin.npz")))
+    np.save(tmp / "kinship.npy", K)
+    (tmp / "kinship_loco").mkdir()
+    for c, k in loco.items():
+        np.save(tmp / "kinship_loco" / f"{c}.npy", k)
+    strains = pd.read_csv(strains_tsv, sep="\t", index_col=0)
+    strains["clone_group"] = clone_groups(K)
+    strains.to_csv(tmp / "strains.tsv", sep="\t")
+
+    shutil.copy(inputs / "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz", tmp / "phenotypes.tsv.gz")
+    pa = pd.read_csv(inputs / "genesMatrix_PresenceAbsence.tab.gz", sep="\t", index_col=0)
+    if len(missing := strains.index.difference(pa.index)):
+        raise ValueError(f"{len(missing)} VCF strains missing from the presence/absence matrix: {list(missing)[:5]}")
+    pa = pa.reindex(strains.index)
+    cn = pd.read_csv(inputs / "genesMatrix_CopyNumber.tab.gz", sep="\t", index_col=0).reindex(strains.index)
+    orfs = orf_table(pa.columns, inputs / "allORFs_pangenome.fasta.gz")
+    if list(cn.columns) != list(pa.columns):
+        raise ValueError("presence/absence and copy-number matrices have different columns")
+    orfs.to_csv(tmp / "orfs.tsv", sep="\t", index=False)
+    np.save(tmp / "presence_absence.npy", pa.to_numpy(np.float32))
+    np.save(tmp / "copy_number.npy", cn.to_numpy(np.float32))
+    genes = genes.join(orfs.dropna(subset=["gene"]).drop_duplicates("gene").set_index("gene")["orf"])
+    genes.to_csv(tmp / "genes.tsv", sep="\t")
+
+    with __import__("tarfile").open(inputs / "1011GWASMatrix.tar.gz") as t:
+        t.extractall(tmp / "_gwas", filter="data")
+    prefix = next((tmp / "_gwas").rglob("*.bed")).with_suffix("")
+    bim, dos = read_plink_bed(prefix)
+    fam = [line.split()[1] for line in open(f"{prefix}.fam")]
+    snp = (bim["chrom"] <= 16).to_numpy()  # chromosome 17 rows are CNVs
+    sites = bim[snp].assign(chrom=lambda b: "chromosome" + b["chrom"].astype(str))
+    sites.to_csv(tmp / "placement_sites.tsv", sep="\t", index=False)
+    np.save(tmp / "placement.npy", pd.DataFrame(dos[snp].T, index=fam).reindex(strains.index).fillna(-1)
+            .to_numpy(np.int8))
+    shutil.rmtree(tmp / "_gwas")
+
+    (tmp / "reference").mkdir()
+    for name in ("ref.fa", "ref.gff3", "aliases.tsv"):
+        shutil.copy(Path(reference_dir) / name, tmp / "reference" / name)
+    shutil.copy(inputs / "allORFs_pangenome.fasta.gz", tmp / "reference")
+
+    manifest = {
+        "format": 1, "panel_version": params.pop("panel_version"), "built_with": f"mutation-hunter {__version__}",
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"), "inputs_md5": input_md5,
+        "params": params, "counts": {"strains": len(strains), "variant_rows": len(var), "genes": int((genes["first"] >= 0).sum()),
+                                     "clone_groups": int(strains["clone_group"].nunique()),
+                                     "classes": var["class"].value_counts().to_dict()},
+    }
+    (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    files = sorted(p for p in tmp.rglob("*") if p.is_file())
+    (tmp / "SHA256SUMS").write_text("".join(f"{file_hash(p, 'sha256')}  {p.relative_to(tmp)}\n" for p in files))
+    shutil.rmtree(out, ignore_errors=True)
+    tmp.rename(out)
