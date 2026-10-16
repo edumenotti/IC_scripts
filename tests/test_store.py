@@ -61,3 +61,16 @@ def test_panel_rejects_unknown_format(store):
     (store / "manifest.json").write_text(m)
     with pytest.raises(ValueError, match="format 2"):
         st.Panel(store)
+
+
+def test_panel_rejects_partial_copy(store):
+    (store / "kinship_loco" / "chromosome2.npy").unlink()
+    with pytest.raises(RuntimeError, match="incomplete.*kinship_loco/chromosome2.npy"):
+        st.Panel(store)
+
+
+def test_panel_rejects_truncated_file(store):
+    f = store / "presence_absence.npy"
+    f.write_bytes(f.read_bytes()[:-8])
+    with pytest.raises(RuntimeError, match="incomplete.*presence_absence.npy"):
+        st.Panel(store)

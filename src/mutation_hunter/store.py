@@ -77,6 +77,10 @@ class Panel:
         self.manifest = json.loads((self.path / "manifest.json").read_text())
         if self.manifest["format"] != FORMAT:
             raise ValueError(f"panel format {self.manifest['format']} is not supported (expected {FORMAT})")
+        for name, size in self.manifest["files"].items():
+            f = self.path / name
+            if not f.exists() or f.stat().st_size != size:
+                raise RuntimeError(f"incomplete panel store: {name} is missing or truncated; copy it again")
         self.strains = pd.read_csv(self.path / "strains.tsv", sep="\t", index_col=0)
         self.genes = pd.read_csv(self.path / "genes.tsv", sep="\t", index_col=0)
         self.variants = pd.read_csv(self.path / "variants.tsv.gz", sep="\t", keep_default_na=False,

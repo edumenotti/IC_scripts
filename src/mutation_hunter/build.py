@@ -40,6 +40,25 @@ INPUTS = {
     "1011GWASMatrix.tar.gz": "c68c2ee5d9f4b5c85b8436a4a2f31ba5",
     "41586_2018_30_MOESM3_ESM.xls": "23d0ff1ec5c13a6b2e20a8076eb588c1",
 }
+_U, _E = "http://1002genomes.u-strasbg.fr/files/", "https://ftp.ensembl.org/pub/release-115/"
+SOURCES = {
+    "1011Matrix.gvcf.gz": _U + "1011Matrix.gvcf.gz",
+    "Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz":
+        _E + "fasta/saccharomyces_cerevisiae/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz",
+    "Saccharomyces_cerevisiae.R64-1-1.115.gff3.gz": _E + "gff3/saccharomyces_cerevisiae/Saccharomyces_cerevisiae.R64-1-1.115.gff3.gz",
+    "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz": _U + "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz",
+    "genesMatrix_PresenceAbsence.tab.gz": _U + "genesMatrix_PresenceAbsence.tab.gz",
+    "genesMatrix_CopyNumber.tab.gz": _U + "genesMatrix_CopyNumber.tab.gz",
+    "allORFs_pangenome.fasta.gz": _U + "allORFs_pangenome.fasta.gz",
+    "1011GWASMatrix.tar.gz": _U + "1011GWASMatrix.tar.gz",
+    "41586_2018_30_MOESM3_ESM.xls": "https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-018-0030-5/"
+                                    "MediaObjects/41586_2018_30_MOESM3_ESM.xls",
+}
+# RefSeq and GenBank accessions of R64 chromosomes I..XVI (NCBI assembly report GCF_000146045.2).
+REFSEQ = "NC_001133.9 NC_001134.8 NC_001135.5 NC_001136.10 NC_001137.3 NC_001138.5 NC_001139.9 NC_001140.6 " \
+         "NC_001141.2 NC_001142.9 NC_001143.9 NC_001144.5 NC_001145.3 NC_001146.8 NC_001147.6 NC_001148.4".split()
+GENBANK = "BK006935.2 BK006936.2 BK006937.2 BK006938.2 BK006939.2 BK006940.2 BK006941.2 BK006934.2 " \
+          "BK006942.2 BK006943.2 BK006944.2 BK006945.2 BK006946.2 BK006947.3 BK006948.2 BK006949.2".split()
 
 
 def file_hash(path, algo="md5") -> str:
@@ -84,8 +103,8 @@ def reference(fasta_gz, gff_gz, out) -> None:
                 o.write(line)
             elif (col := line.split("\t", 1))[0] in RENAME:
                 o.write(RENAME[col[0]] + "\t" + col[1])
-    rows = [(a, c) for r, c in RENAME.items() for a in (r, f"chr{r}", c, c.replace("chromosome", "chr"),
-                                                         c.replace("chromosome", ""))]
+    rows = [(a, c) for (r, c), rs, gb in zip(RENAME.items(), REFSEQ, GENBANK)
+            for a in (r, f"chr{r}", c, c.replace("chromosome", "chr"), c.replace("chromosome", ""), rs, gb)]
     pd.DataFrame(rows, columns=["alias", "chrom"]).to_csv(out / "aliases.tsv", sep="\t", index=False)
     write_fai(out / "ref.fa")
 
@@ -317,7 +336,8 @@ def assemble(parts_dir, inputs_dir, reference_dir, strains_tsv, out, input_md5: 
     for c, k in loco.items():
         np.save(tmp / "kinship_loco" / f"{c}.npy", k)
     strains = pd.read_csv(strains_tsv, sep="\t", index_col=0)
-    strains["clone_group"] = clone_groups(K)
+    params = {"clone_frac": 0.01, **params}
+    strains["clone_group"] = clone_groups(K, params["clone_frac"])
     strains.to_csv(tmp / "strains.tsv", sep="\t")
 
     shutil.copy(inputs / "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz", tmp / "phenotypes.tsv.gz")
@@ -354,11 +374,13 @@ def assemble(parts_dir, inputs_dir, reference_dir, strains_tsv, out, input_md5: 
 
     manifest = {
         "format": 1, "panel_version": params.pop("panel_version"), "built_with": f"mutation-hunter {__version__}",
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"), "inputs_md5": input_md5,
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"), "inputs_md5": input_md5, "inputs_source": SOURCES,
         "params": params, "counts": {"strains": len(strains), "variant_rows": len(var), "genes": int((genes["first"] >= 0).sum()),
                                      "clone_groups": int(strains["clone_group"].nunique()),
                                      "classes": var["class"].value_counts().to_dict()},
     }
+    # Sizes let Panel() reject a partial copy cheaply; SHA256SUMS is for the slow full check.
+    manifest["files"] = {str(p.relative_to(tmp)): p.stat().st_size for p in sorted(tmp.rglob("*")) if p.is_file()}
     (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2))
     files = sorted(p for p in tmp.rglob("*") if p.is_file())
     (tmp / "SHA256SUMS").write_text("".join(f"{file_hash(p, 'sha256')}  {p.relative_to(tmp)}\n" for p in files))

@@ -137,3 +137,20 @@ def test_assemble_is_byte_reproducible(store, tmp_path):
     differ = [line for line, other in zip((store / "SHA256SUMS").read_text().splitlines(),
                                           (tmp_path / "again" / "SHA256SUMS").read_text().splitlines()) if line != other]
     assert {line.split("  ")[1] for line in differ} <= {"manifest.json"}  # at most the creation time changes
+
+
+def test_aliases_include_refseq_and_genbank(tmp_path):
+    fa = tmp_path / "r.fa.gz"
+    fa.write_bytes(gzip.compress(b">I x\nACGT\n"))
+    gff = tmp_path / "r.gff3.gz"
+    gff.write_bytes(gzip.compress(b"##gff-version 3\n"))
+    build.reference(fa, gff, tmp_path / "out")
+    aliases = pd.read_csv(tmp_path / "out/aliases.tsv", sep="\t").set_index("alias")["chrom"]
+    assert aliases["NC_001133.9"] == "chromosome1" and aliases["BK006935.2"] == "chromosome1"
+    assert aliases["BK006934.2"] == "chromosome8" and aliases["NC_001148.4"] == "chromosome16"
+
+
+def test_manifest_records_clone_threshold_and_input_sources(store):
+    m = json.loads((store / "manifest.json").read_text())
+    assert m["params"]["clone_frac"] == 0.01
+    assert set(m["inputs_source"]) == set(build.INPUTS) and all(m["inputs_source"].values())

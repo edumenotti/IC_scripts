@@ -86,6 +86,7 @@ process GENOTYPES {
 
 process ASSEMBLE {
     publishDir params.outdir, mode: 'copy'
+    conda 'bioconda::bcftools=1.20'  // same bcftools as ANNOTATE, so the manifest records the one that ran
     memory '16 GB'
 
     input:
@@ -110,7 +111,7 @@ process ASSEMBLE {
 workflow {
     if (!params.inputs || !params.panel_version) error "set --inputs <folder> and --panel_version <x.y.z>"
     inputs = file(params.inputs, checkIfExists: true)
-    commit = "git -C $projectDir rev-parse HEAD".execute().text.trim()
+    commit = "git -C $projectDir describe --always --dirty --abbrev=40".execute().text.trim()
     provenance = "\"nextflow\": \"${nextflow.version}\", \"pipeline_commit\": \"${commit}\""
     checked = CHECK(inputs)
     reference = REFERENCE(inputs, checked)
