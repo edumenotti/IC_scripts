@@ -196,9 +196,10 @@ def standardised_carriers(code: np.ndarray, min_freq=0.05, min_call=0.95) -> np.
     return np.where(called, (code > 0) - f, 0.0) / np.sqrt(f * (1 - f))
 
 
-def genotypes(bcf, strains_tsv, gff, out_prefix, min_gq=20, min_dp=5) -> None:
-    """One chromosome: <out>.variants.tsv.gz, <out>.geno.npz (variant rows x strains) and <out>.kin.npz
-    (sum of Z'Z over common SNPs and their count, for the GRM and its LOCO versions)."""
+def genotypes(bcf, strains_tsv, gff, out_prefix, min_gq=20, min_dp=5, sites=None) -> None:
+    """One chromosome: <out>.variants.tsv.gz, <out>.geno.npz (variant rows x strains), <out>.kin.npz
+    (sum of Z'Z over common SNPs and their count, for the GRM and its LOCO versions) and <out>.place.npz
+    (panel codes at the placement sites listed in `sites`, a chrom/pos TSV; SNVs only)."""
     from cyvcf2 import VCF
 
     strains = pd.read_csv(strains_tsv, sep="\t", index_col=0)
@@ -209,8 +210,12 @@ def genotypes(bcf, strains_tsv, gff, out_prefix, min_gq=20, min_dp=5) -> None:
     plen = protein_lengths(gff)
     rows, mats, block = [], [], []
     zz, m = np.zeros((len(strains),) * 2), 0
+    want = set() if sites is None else set(pd.read_csv(sites, sep="\t").itertuples(index=False, name=None))
+    place = []
     for rec in vcf:
         code = encode(rec.gt_types, rec.gt_quals, rec.format("DP")[:, 0], haploid, min_gq, min_dp)
+        if len(rec.REF) == 1 and len(rec.ALT[0]) == 1 and (rec.CHROM, rec.POS) in want:
+            place.append((rec.POS, rec.REF, rec.ALT[0], code))
         if len(rec.REF) == 1 and len(rec.ALT[0]) == 1 and (z := standardised_carriers(code)) is not None:
             block.append(z)
             if len(block) == 2000:
@@ -238,6 +243,9 @@ def genotypes(bcf, strains_tsv, gff, out_prefix, min_gq=20, min_dp=5) -> None:
     geno = sparse.vstack(mats, format="csr") if mats else sparse.csr_matrix((0, len(strains)), dtype=np.int8)
     sparse.save_npz(f"{out_prefix}.geno.npz", geno.astype(np.int8))
     np.savez(f"{out_prefix}.kin.npz", zz=zz, m=m)
+    pos, ref, alt, code = zip(*place) if place else ((), (), (), np.zeros((0, len(strains)), np.int8))
+    np.savez(f"{out_prefix}.place.npz", pos=np.array(pos, int), ref=np.array(ref, str), alt=np.array(alt, str),
+             code=np.array(code, np.int8).reshape(-1, len(strains)))
 
 
 def strain_table(xls, samples: list[str], phenotypes_gz) -> pd.DataFrame:
@@ -279,18 +287,16 @@ def orf_table(pa_columns, pangenome_fasta_gz) -> pd.DataFrame:
                          "gene": base.where(base.str.match(SYSTEMATIC.pattern))})
 
 
-def read_plink_bed(prefix) -> tuple[pd.DataFrame, np.ndarray]:
-    """PLINK 1 SNP-major .bed -> (bim table, int8 sites x samples: alt-allele count 0/1/2, -1 missing)."""
-    bim = pd.read_csv(f"{prefix}.bim", sep=r"\s+", header=None, names=["chrom", "id", "cm", "pos", "a1", "a2"])
-    n = sum(1 for _ in open(f"{prefix}.fam"))
-    raw = np.fromfile(f"{prefix}.bed", dtype=np.uint8)
-    if raw[:3].tolist() != [0x6C, 0x1B, 0x01]:
-        raise ValueError("not a SNP-major PLINK 1 .bed")
-    packed = raw[3:].reshape(len(bim), -1)
-    bits = np.stack([(packed >> s) & 3 for s in (0, 2, 4, 6)], axis=2).reshape(len(bim), -1)[:, :n]
-    # PLINK codes: 0 hom A1, 1 missing, 2 het, 3 hom A2; count A1 copies.
-    lut = np.array([2, -1, 1, 0], dtype=np.int8)
-    return bim, lut[bits]
+def gwas_sites(gwas_tar_gz) -> pd.DataFrame:
+    """Common SNPs of the public 1011GWAS_matrix (.bim inside the tarball) as chrom/pos. Only the positions are
+    used: placement genotypes come from the panel VCF, so they share its quality rules and alt-allele coding."""
+    import tarfile
+
+    with tarfile.open(gwas_tar_gz) as t:
+        member = next(m for m in t.getmembers() if m.name.endswith(".bim"))
+        bim = pd.read_csv(t.extractfile(member), sep=r"\s+", header=None, names=["chrom", "id", "cm", "pos", "a1", "a2"])
+    bim = bim[bim["chrom"] <= 16]  # chromosome 17 rows are CNVs
+    return pd.DataFrame({"chrom": "chromosome" + bim["chrom"].astype(str), "pos": bim["pos"]}).reset_index(drop=True)
 
 
 def kinships(parts: list[Path]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -355,17 +361,16 @@ def assemble(parts_dir, inputs_dir, reference_dir, strains_tsv, out, input_md5: 
     genes = genes.join(orfs.dropna(subset=["gene"]).drop_duplicates("gene").set_index("gene")["orf"])
     genes.to_csv(tmp / "genes.tsv", sep="\t")
 
-    with __import__("tarfile").open(inputs / "1011GWASMatrix.tar.gz") as t:
-        t.extractall(tmp / "_gwas", filter="data")
-    prefix = next((tmp / "_gwas").rglob("*.bed")).with_suffix("")
-    bim, dos = read_plink_bed(prefix)
-    fam = [line.split()[1] for line in open(f"{prefix}.fam")]
-    snp = (bim["chrom"] <= 16).to_numpy()  # chromosome 17 rows are CNVs
-    sites = bim[snp].assign(chrom=lambda b: "chromosome" + b["chrom"].astype(str))
-    sites.to_csv(tmp / "placement_sites.tsv", sep="\t", index=False)
-    np.save(tmp / "placement.npy", pd.DataFrame(dos[snp].T, index=fam).reindex(strains.index).fillna(-1)
-            .to_numpy(np.int8))
-    shutil.rmtree(tmp / "_gwas")
+    pl = [np.load(parts_dir / f"{c}.place.npz") for c in chroms]
+    sites = pd.DataFrame({"chrom": np.repeat(chroms, [len(z["pos"]) for z in pl]),
+                          "pos": np.concatenate([z["pos"] for z in pl]), "ref": np.concatenate([z["ref"] for z in pl]),
+                          "alt": np.concatenate([z["alt"] for z in pl])})
+    code = np.concatenate([z["code"] for z in pl])
+    single = ~sites.duplicated(["chrom", "pos"], keep=False).to_numpy()  # multiallelic: "the alt allele" is ambiguous
+    sites[single].to_csv(tmp / "placement_sites.tsv", sep="\t", index=False)
+    np.save(tmp / "placement.npy", np.ascontiguousarray(code[single].T))
+    expected = gwas_sites(inputs / "1011GWASMatrix.tar.gz")
+    n_multi = sites[~single].drop_duplicates(["chrom", "pos"]).shape[0]
 
     (tmp / "reference").mkdir()
     for name in ("ref.fa", "ref.gff3", "aliases.tsv"):
@@ -377,6 +382,8 @@ def assemble(parts_dir, inputs_dir, reference_dir, strains_tsv, out, input_md5: 
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"), "inputs_md5": input_md5, "inputs_source": SOURCES,
         "params": params, "counts": {"strains": len(strains), "variant_rows": len(var), "genes": int((genes["first"] >= 0).sum()),
                                      "clone_groups": int(strains["clone_group"].nunique()),
+                                     "placement_sites": int(single.sum()), "placement_multiallelic": n_multi,
+                                     "placement_missing": len(expected) - int(single.sum()) - n_multi,
                                      "classes": var["class"].value_counts().to_dict()},
     }
     # Sizes let Panel() reject a partial copy cheaply; SHA256SUMS is for the slow full check.
@@ -396,6 +403,8 @@ def main(argv=None) -> int:
     s = sub.add_parser("strains"); s.add_argument("inputs"); s.add_argument("samples"); s.add_argument("out")
     s = sub.add_parser("genotypes"); s.add_argument("bcf"); s.add_argument("strains"); s.add_argument("gff")
     s.add_argument("out_prefix"); s.add_argument("--min-gq", type=int, default=20); s.add_argument("--min-dp", type=int, default=5)
+    s.add_argument("--sites")
+    s = sub.add_parser("sites"); s.add_argument("inputs"); s.add_argument("out")
     s = sub.add_parser("assemble")
     for a in ("parts", "inputs", "reference", "strains", "out"):
         s.add_argument(a)
@@ -411,7 +420,9 @@ def main(argv=None) -> int:
         samples = Path(a.samples).read_text().split()
         strain_table(d / "41586_2018_30_MOESM3_ESM.xls", samples, d / "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz").to_csv(a.out, sep="\t")
     elif a.step == "genotypes":
-        genotypes(a.bcf, a.strains, a.gff, a.out_prefix, a.min_gq, a.min_dp)
+        genotypes(a.bcf, a.strains, a.gff, a.out_prefix, a.min_gq, a.min_dp, a.sites)
+    elif a.step == "sites":
+        gwas_sites(Path(a.inputs) / "1011GWASMatrix.tar.gz").to_csv(a.out, sep="\t", index=False)
     else:
         assemble(a.parts, a.inputs, a.reference, a.strains, a.out, check_inputs(a.inputs),
                  {"panel_version": a.panel_version, **json.loads(a.params)})

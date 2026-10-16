@@ -76,7 +76,11 @@ def built(tmp_path):
     subprocess.run([ANNOTATE, tmp_path / "in.vcf.gz", "chromosome1", tmp_path / "ref.fa", tmp_path / "ref.gff3",
                     tmp_path / "out.bcf"], check=True)
     pd.DataFrame({"ploidy": [2] * 7 + [1]}, index=pd.Index(SAMPLES, name="strain")).to_csv(tmp_path / "strains.tsv", sep="\t")
-    build.genotypes(tmp_path / "out.bcf", tmp_path / "strains.tsv", tmp_path / "ref.gff3", tmp_path / "chromosome1")
+    # Placement sites: one SNV, one multiallelic SNV, one indel (not a SNV) and one position absent from the VCF.
+    pd.DataFrame({"chrom": "chromosome1", "pos": [pos(10, 1), pos(50, 1), pos(30, 3), 1999]}).to_csv(
+        tmp_path / "sites.tsv", sep="\t", index=False)
+    build.genotypes(tmp_path / "out.bcf", tmp_path / "strains.tsv", tmp_path / "ref.gff3", tmp_path / "chromosome1",
+                    sites=tmp_path / "sites.tsv")
     var = pd.read_csv(tmp_path / "chromosome1.variants.tsv.gz", sep="\t", keep_default_na=False)
     return var, sparse.load_npz(tmp_path / "chromosome1.geno.npz").toarray(), tmp_path
 
@@ -110,3 +114,11 @@ def test_quality_rules_set_missing(built):
     row = var.index[var["pos"] == pos(60, 1)][0]
     assert geno[row].tolist() == [2, 0, 0, 0, 0, -1, -1, -1]  # GQ 10, DP 3, het in haploid
     assert var.loc[row, "call_rate"] == 5 / 8
+
+
+def test_placement_uses_panel_codes_at_common_snvs(built):
+    _, geno, tmp_path = built
+    pl = np.load(tmp_path / "chromosome1.place.npz")
+    assert pl["pos"].tolist() == [pos(10, 1), pos(50, 1), pos(50, 1)]  # indel and absent site skipped
+    assert pl["ref"].tolist() == ["G", "G", "G"] and sorted(pl["alt"].tolist()[1:]) == ["A", "C"]
+    assert pl["code"][0].tolist() == geno[0].tolist() == [1, 2, 0, 0, 0, 0, 0, 2]  # alt-allele codes, same as the panel

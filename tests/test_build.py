@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from conftest import write_bed
+import tarfile
+
 from mutation_hunter import build
 
 
@@ -91,11 +92,12 @@ def test_orf_table_uses_the_number_to_recover_real_names(tmp_path):
         build.orf_table(["X2.SOMETHING"], fa)
 
 
-def test_read_plink_bed_roundtrip(tmp_path):
-    dos = np.array([[0, 1, 2, -1, 2], [2, 2, 0, 0, 1]])
-    write_bed(tmp_path / "x", dos, [1, 17], list("abcde"))
-    bim, got = build.read_plink_bed(tmp_path / "x")
-    assert got.tolist() == dos.tolist() and bim["chrom"].tolist() == [1, 17]
+def test_gwas_sites_keeps_snps_and_drops_cnv_rows(tmp_path):
+    (tmp_path / "m.bim").write_text("1\trs0\t0\t31605\t1\t2\n16\trs1\t0\t9\t1\t2\n17\tcnv\t0\t1\t1\t2\n")
+    with tarfile.open(tmp_path / "g.tar.gz", "w:gz") as t:
+        t.add(tmp_path / "m.bim", arcname="dir/m.bim")
+    s = build.gwas_sites(tmp_path / "g.tar.gz")
+    assert list(zip(s["chrom"], s["pos"])) == [("chromosome1", 31605), ("chromosome16", 9)]
 
 
 def test_clone_groups():
@@ -115,7 +117,10 @@ def test_assemble_store_layout(store):
     genes = pd.read_csv(store / "genes.tsv", sep="\t", index_col=0)
     assert genes.loc["YAL901W", ["first", "last"]].tolist() == [0, 1] and genes.loc["YBL903W", "first"] == -1
     assert genes.loc["YAL901W", "orf"] == "YAL901W"
-    assert np.load(store / "placement.npy").shape == (6, 2)  # chromosome 17 (CNV) rows dropped
+    sites = pd.read_csv(store / "placement_sites.tsv", sep="\t")
+    assert sites.to_dict("list") == {"chrom": ["chromosome1", "chromosome2"], "pos": [5, 9], "ref": ["C", "T"], "alt": ["T", "G"]}
+    assert np.load(store / "placement.npy").tolist() == [[2, 0], [1, 0], [0, 1], [-1, 1], [0, 2], [2, 0]]  # strains x sites
+    assert (m["counts"]["placement_sites"], m["counts"]["placement_multiallelic"], m["counts"]["placement_missing"]) == (2, 1, 1)
     assert sorted(p.name for p in (store / "kinship_loco").iterdir()) == ["chromosome1.npy", "chromosome2.npy"]
     listed = {line.split("  ", 1)[1] for line in (store / "SHA256SUMS").read_text().splitlines()}
     assert {"manifest.json", "genotypes/data.npy", "reference/ref.fa"} <= listed

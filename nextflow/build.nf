@@ -40,12 +40,14 @@ process STRAINS {
     val checked
 
     output:
-    path 'strains.tsv'
+    path 'strains.tsv', emit: strains
+    path 'sites.tsv', emit: sites
 
     script:
     """
     bcftools query -l $inputs/1011Matrix.gvcf.gz > samples.txt
     python -m mutation_hunter.build strains $inputs samples.txt strains.tsv
+    python -m mutation_hunter.build sites $inputs sites.tsv
     """
 }
 
@@ -73,6 +75,7 @@ process GENOTYPES {
     tuple val(chrom), path(bcf), path(csi)
     path strains
     path reference
+    path sites
 
     output:
     path "${chrom}.*.{tsv.gz,npz}"
@@ -80,7 +83,7 @@ process GENOTYPES {
     script:
     """
     python -m mutation_hunter.build genotypes $bcf $strains $reference/ref.gff3 $chrom \\
-        --min-gq $params.min_gq --min-dp $params.min_dp
+        --min-gq $params.min_gq --min-dp $params.min_dp --sites $sites
     """
 }
 
@@ -115,9 +118,10 @@ workflow {
     provenance = "\"nextflow\": \"${nextflow.version}\", \"pipeline_commit\": \"${commit}\""
     checked = CHECK(inputs)
     reference = REFERENCE(inputs, checked)
-    strains = STRAINS(inputs, checked)
+    STRAINS(inputs, checked)
+    strains = STRAINS.out.strains
     chroms = Channel.of(1..16).map { "chromosome$it" }
     ANNOTATE(chroms, inputs, reference)
-    GENOTYPES(ANNOTATE.out, strains, reference)
+    GENOTYPES(ANNOTATE.out, strains, reference, STRAINS.out.sites)
     ASSEMBLE(GENOTYPES.out.flatten().collect(), inputs, reference, strains, provenance)
 }

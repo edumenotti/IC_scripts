@@ -74,20 +74,6 @@ chromosome2\tt\tgene\t1500\t1800\t.\t+\t.\tID=gene:YBL903W;biotype=protein_codin
 """
 
 
-def write_bed(prefix, dosage: np.ndarray, chroms: list[int], samples: list[str]) -> None:
-    """Minimal PLINK 1 SNP-major writer (dosage = A1 copies, -1 missing), for tests only."""
-    code = {2: 0, -1: 1, 1: 2, 0: 3}
-    n = dosage.shape[1]
-    out = bytearray([0x6C, 0x1B, 0x01])
-    for row in dosage:
-        b = [code[int(x)] for x in row] + [0] * (-n % 4)
-        out += bytes(b[i] | b[i + 1] << 2 | b[i + 2] << 4 | b[i + 3] << 6 for i in range(0, len(b), 4))
-    open(f"{prefix}.bed", "wb").write(bytes(out))
-    pd.DataFrame({"c": chroms, "id": [f"rs{i}" for i in range(len(chroms))], "cm": 0, "pos": range(1, len(chroms) + 1),
-                  "a1": "A", "a2": "G"}).to_csv(f"{prefix}.bim", sep="\t", header=False, index=False)
-    open(f"{prefix}.fam", "w").write("".join(f"{s} {s} 0 0 0 -9\n" for s in samples))
-
-
 @pytest.fixture
 def store(tmp_path):
     """Run build.assemble on hand-made per-chromosome parts; returns the store folder."""
@@ -108,6 +94,10 @@ def store(tmp_path):
         sparse.save_npz(parts / f"{chrom}.geno.npz", sparse.csr_matrix(np.array([r[3] for r in rows], np.int8)))
         Z = rng.normal(size=(50, n))
         np.savez(parts / f"{chrom}.kin.npz", zz=Z.T @ Z, m=50)
+    # Placement parts: chromosome1 site 7 is multiallelic (two rows) and gets dropped.
+    np.savez(parts / "chromosome1.place.npz", pos=[5, 7, 7], ref=["C", "A", "A"], alt=["T", "G", "C"],
+             code=np.array([[2, 1, 0, -1, 0, 2], [0] * 6, [1] * 6], np.int8))
+    np.savez(parts / "chromosome2.place.npz", pos=[9], ref=["T"], alt=["G"], code=np.array([[0, 0, 1, 1, 2, 0]], np.int8))
     (ref / "ref.gff3").write_text(GFF)
     (ref / "ref.fa").write_text(">chromosome1\nACGT\n")
     (ref / "aliases.tsv").write_text("alias\tchrom\nI\tchromosome1\n")
@@ -125,8 +115,9 @@ def store(tmp_path):
         gzip.compress(b">1-EC1118_1F14_0012g\nATG\n>2-YAL901W\nATG\n>3-YAL005C_NumOfGenes_3\nATG\n"))
     gw = tmp_path / "gw"
     gw.mkdir()
-    write_bed(gw / "1011GWAS_matrix", np.array([[0, 1, 2, -1, 0, 2], [2, 2, 0, 0, 1, 1], [1, 0, 0, 0, 0, 0]]),
-              [1, 2, 17], STORE_STRAINS)
+    # Common SNPs of the public GWAS matrix: chromosome2:11 is absent from the VCF, chromosome 17 rows are CNVs.
+    (gw / "1011GWAS_matrix.bim").write_text("1\trs0\t0\t5\t1\t2\n1\trs1\t0\t7\t1\t2\n2\trs2\t0\t9\t1\t2\n"
+                                           "2\trs3\t0\t11\t1\t2\n17\tcnv\t0\t1\t1\t2\n")
     with tarfile.open(inputs / "1011GWASMatrix.tar.gz", "w:gz") as t:
         for f in gw.iterdir():
             t.add(f, arcname=f.name)
