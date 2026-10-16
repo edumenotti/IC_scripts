@@ -1,0 +1,149 @@
+"""Build the panel store from the public 1011 genomes data. Maintainers only.
+
+Steps are called by nextflow/build.nf; bcftools does normalisation and consequence annotation upstream.
+Needs the optional extra `build` (cyvcf2, xlrd)."""
+
+import argparse
+import gzip
+import hashlib
+import json
+import re
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy import sparse
+from scipy.sparse.csgraph import connected_components
+
+from . import __version__
+
+ROMAN = "I II III IV V VI VII VIII IX X XI XII XIII XIV XV XVI".split()
+CHROMS = [f"chromosome{i}" for i in range(1, 17)]
+RENAME = dict(zip(ROMAN, CHROMS))
+LOF = {"stop_gained", "frameshift", "splice_acceptor", "splice_donor", "start_lost"}
+INFRAME = {"inframe_insertion", "inframe_deletion"}
+SYSTEMATIC = re.compile(r"^Y[A-P][LR]\d{3}[WC](-[A-Z])?$")
+VARIANT_COLUMNS = ["chrom", "pos", "ref", "alt", "old_rec", "gene", "transcript", "consequence", "class",
+                   "aa_change", "aa_pos", "protein_len", "ac", "an", "n_het", "n_hom", "call_rate", "ref_is_minor"]
+# Upstream inputs and their MD5 (md5.txt of 1002genomes on 2025-04-01, Ensembl release 115, Nature supplement).
+INPUTS = {
+    "1011Matrix.gvcf.gz": "42478e3e9dff4bd46993d82d8eab40d4",
+    "Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz": "5ae49d2d22cd977abdd6b054b94c544d",
+    "Saccharomyces_cerevisiae.R64-1-1.115.gff3.gz": "17ed999c1853e03562f89bbcaefa80b6",
+    "phenoMatrix_35ConditionsNormalizedByYPD.tab.gz": "479862335552a050e46de163d1ee5f72",
+    "genesMatrix_PresenceAbsence.tab.gz": "b3b96719de226eaa277589d8d01f9202",
+    "genesMatrix_CopyNumber.tab.gz": "c36cdf023c554580fe5b67101742fc09",
+    "allORFs_pangenome.fasta.gz": "4f1ebba402ae64e52f2af72fa6942f38",
+    "1011GWASMatrix.tar.gz": "c68c2ee5d9f4b5c85b8436a4a2f31ba5",
+    "41586_2018_30_MOESM3_ESM.xls": "23d0ff1ec5c13a6b2e20a8076eb588c1",
+}
+
+
+def file_hash(path, algo="md5") -> str:
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def check_inputs(folder) -> dict:
+    """Verify every upstream input in folder against its pinned MD5; return {name: md5}."""
+    folder = Path(folder)
+    for name, md5 in INPUTS.items():
+        if not (folder / name).exists():
+            raise FileNotFoundError(f"missing input {name} in {folder}")
+        if (got := file_hash(folder / name)) != md5:
+            raise ValueError(f"{name}: MD5 {got} != pinned {md5}; upstream changed or file is corrupt")
+    return dict(INPUTS)
+
+
+def reference(fasta_gz, gff_gz, out) -> None:
+    """R64 without Mito, chromosomes renamed I..XVI -> chromosome1..16 (the panel's names), plus aliases.tsv."""
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    keep = False
+    with gzip.open(fasta_gz, "rt") as f, open(out / "ref.fa", "w") as o:
+        for line in f:
+            if line.startswith(">"):
+                name = line[1:].split()[0]
+                if keep := name in RENAME:
+                    o.write(f">{RENAME[name]}\n")
+            elif keep:
+                o.write(line)
+    with gzip.open(gff_gz, "rt") as f, open(out / "ref.gff3", "w") as o:
+        for line in f:
+            if line.startswith("##sequence-region"):
+                p = line.split()
+                if p[1] in RENAME:
+                    o.write(" ".join([p[0], RENAME[p[1]], *p[2:]]) + "\n")
+            elif line.startswith("#"):
+                o.write(line)
+            elif (col := line.split("\t", 1))[0] in RENAME:
+                o.write(RENAME[col[0]] + "\t" + col[1])
+    rows = [(a, c) for r, c in RENAME.items() for a in (r, f"chr{r}", c, c.replace("chromosome", "chr"),
+                                                         c.replace("chromosome", ""))]
+    pd.DataFrame(rows, columns=["alias", "chrom"]).to_csv(out / "aliases.tsv", sep="\t", index=False)
+    write_fai(out / "ref.fa")
+
+
+def write_fai(fa) -> None:
+    """samtools-style .fai, written once here so parallel bcftools jobs never race to create it."""
+    rows, offset = [], 0
+    with open(fa, "rb") as f:
+        for line in f:
+            if line.startswith(b">"):
+                rows.append([line[1:].split()[0].decode(), 0, offset + len(line), 0, 0])
+            else:
+                row = rows[-1]
+                if not row[3]:
+                    row[3], row[4] = len(line.rstrip(b"\n")), len(line)
+                row[1] += len(line.rstrip(b"\n"))
+            offset += len(line)
+    Path(f"{fa}.fai").write_text("".join("\t".join(map(str, r)) + "\n" for r in rows))
+
+
+def protein_lengths(gff) -> dict[str, int]:
+    """Transcript -> protein length in amino acids (CDS length / 3, stop codon excluded)."""
+    cds = {}
+    for line in open(gff):
+        col = line.split("\t")
+        if len(col) > 8 and col[2] == "CDS":
+            t = re.search(r"Parent=transcript:([^;\n]+)", col[8])[1]
+            cds[t] = cds.get(t, 0) + int(col[4]) - int(col[3]) + 1
+    return {t: n // 3 - 1 for t, n in cds.items()}
+
+
+def gene_spans(gff) -> pd.DataFrame:
+    rows = []
+    for line in open(gff):
+        col = line.split("\t")
+        if len(col) > 8 and col[2] == "gene" and "biotype=protein_coding" in col[8]:
+            rows.append((re.search(r"ID=gene:([^;\n]+)", col[8])[1], col[0], int(col[3]), int(col[4])))
+    return pd.DataFrame(rows, columns=["gene", "chrom", "start", "end"]).set_index("gene")
+
+
+def parse_bcsq(bcsq: str) -> list[tuple[str, str, str]]:
+    """BCSQ -> [(consequence, systematic gene, amino-acid change)] for protein-coding transcripts only."""
+    out = []
+    for item in bcsq.split(","):
+        f = item.split("|")
+        if len(f) >= 4 and f[2].endswith("_mRNA") and f[3] == "protein_coding":
+            out.append((f[0], f[2][:-5], f[5] if len(f) > 5 else ""))
+    return out
+
+
+def classify(consequence: str, aa_pos: int, protein_len: int) -> str:
+    """missense / lof / inframe / synonymous / other. Truncations in the last 5% of the protein are not LoF."""
+    parts = set(consequence.split("&"))
+    if parts & LOF:
+        late = parts & {"stop_gained", "frameshift"} and not parts & {"start_lost", "splice_acceptor", "splice_donor"}
+        return "other" if late and protein_len and aa_pos > 0.95 * protein_len else "lof"
+    if parts & INFRAME:
+        return "inframe"
+    if "missense" in parts:
+        return "missense"
+    return "synonymous" if "synonymous" in parts else "other"
