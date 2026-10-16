@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from conftest import write_bed
 from mutation_hunter import build
 
 
@@ -77,3 +78,21 @@ def test_standardised_carriers_filters_rare_and_badly_called():
     assert z is not None and np.isclose(z.mean(), 0) and np.isclose(z.std(), 1)
     assert build.standardised_carriers(np.array([1] + [0] * 99, np.int8)) is None  # 1% carriers
     assert build.standardised_carriers(np.array([-1] * 10 + [0, 1] * 45, np.int8)) is None  # 90% called
+
+
+def test_orf_table_uses_the_number_to_recover_real_names(tmp_path):
+    fa = tmp_path / "orfs.fa.gz"
+    fa.write_bytes(gzip.compress(b">1-EC1118_1F14_0012g\nA\n>7-YAL016C-A\nA\n>9-YAL005C_NumOfGenes_3\nA\n"))
+    t = build.orf_table(["X1.EC1118_1F14_0012g", "X7.YAL016C.A", "X9.YAL005C_NumOfGenes_3"], fa)
+    assert t["orf"].tolist() == ["EC1118_1F14_0012g", "YAL016C-A", "YAL005C_NumOfGenes_3"]
+    assert t["gene"].tolist()[1:] == ["YAL016C-A", "YAL005C"] and pd.isna(t["gene"][0])
+    assert t["family"].tolist() == [False, False, True]
+    with pytest.raises(ValueError, match="no pangenome ORF"):
+        build.orf_table(["X2.SOMETHING"], fa)
+
+
+def test_read_plink_bed_roundtrip(tmp_path):
+    dos = np.array([[0, 1, 2, -1, 2], [2, 2, 0, 0, 1]])
+    write_bed(tmp_path / "x", dos, [1, 17], list("abcde"))
+    bim, got = build.read_plink_bed(tmp_path / "x")
+    assert got.tolist() == dos.tolist() and bim["chrom"].tolist() == [1, 17]

@@ -1,13 +1,15 @@
-"""A 40-strain fake panel in the exact upstream formats, served from file:// (no internet)."""
+"""Fixtures: a 40-strain fake proteome panel (baseline analysis) and a tiny built panel store (no tools)."""
 
 import gzip
 import io
 import tarfile
 
 import numpy as np
+import pandas as pd
 import pytest
+from scipy import sparse
 
-from mutation_hunter import data
+from mutation_hunter import build, data
 
 STRAINS = [f"A{i:02d}" for i in range(38)] + ["SACE_YBA", "SACE_YCL"]
 CARRIERS = ["A00", "A01", "A02", "SACE_YBA"]  # carry YAL001C:A3V, 4/40 = 10%
@@ -56,3 +58,31 @@ def panel(tmp_path, monkeypatch):
     monkeypatch.setenv("MH_BASE_URL", src.as_uri() + "/")
     monkeypatch.setenv("MH_CACHE", str(tmp_path / "cache"))
     return src
+
+
+# --- tiny built panel ------------------------------------------------------------------------------------
+
+STORE_STRAINS = ["S1", "S2", "S3", "S4", "S5", "SACE_YAA"]
+GFF = """##gff-version 3
+chromosome1\tt\tgene\t101\t400\t.\t+\t.\tID=gene:YAL901W;biotype=protein_coding
+chromosome1\tt\tmRNA\t101\t400\t.\t+\t.\tID=transcript:YAL901W_mRNA;Parent=gene:YAL901W;biotype=protein_coding
+chromosome1\tt\tCDS\t101\t400\t.\t+\t0\tParent=transcript:YAL901W_mRNA
+chromosome2\tt\tgene\t1001\t1300\t.\t-\t.\tID=gene:YBL902C;biotype=protein_coding
+chromosome2\tt\tmRNA\t1001\t1300\t.\t-\t.\tID=transcript:YBL902C_mRNA;Parent=gene:YBL902C;biotype=protein_coding
+chromosome2\tt\tCDS\t1001\t1300\t.\t-\t0\tParent=transcript:YBL902C_mRNA
+chromosome2\tt\tgene\t1500\t1800\t.\t+\t.\tID=gene:YBL903W;biotype=protein_coding
+"""
+
+
+def write_bed(prefix, dosage: np.ndarray, chroms: list[int], samples: list[str]) -> None:
+    """Minimal PLINK 1 SNP-major writer (dosage = A1 copies, -1 missing), for tests only."""
+    code = {2: 0, -1: 1, 1: 2, 0: 3}
+    n = dosage.shape[1]
+    out = bytearray([0x6C, 0x1B, 0x01])
+    for row in dosage:
+        b = [code[int(x)] for x in row] + [0] * (-n % 4)
+        out += bytes(b[i] | b[i + 1] << 2 | b[i + 2] << 4 | b[i + 3] << 6 for i in range(0, len(b), 4))
+    open(f"{prefix}.bed", "wb").write(bytes(out))
+    pd.DataFrame({"c": chroms, "id": [f"rs{i}" for i in range(len(chroms))], "cm": 0, "pos": range(1, len(chroms) + 1),
+                  "a1": "A", "a2": "G"}).to_csv(f"{prefix}.bim", sep="\t", header=False, index=False)
+    open(f"{prefix}.fam", "w").write("".join(f"{s} {s} 0 0 0 -9\n" for s in samples))

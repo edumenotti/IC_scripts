@@ -219,3 +219,56 @@ def genotypes(bcf, strains_tsv, gff, out_prefix, min_gq=20, min_dp=5) -> None:
     geno = sparse.vstack(mats, format="csr") if mats else sparse.csr_matrix((0, len(strains)), dtype=np.int8)
     sparse.save_npz(f"{out_prefix}.geno.npz", geno.astype(np.int8))
     np.savez(f"{out_prefix}.kin.npz", zz=zz, m=m)
+
+
+def strain_table(xls, samples: list[str], phenotypes_gz) -> pd.DataFrame:
+    """Peter 2018 Table S1, in VCF sample order."""
+    s1 = pd.read_excel(xls, "Table S1", header=3)
+    s1 = s1[s1["Standardized name"].notna()].set_index("Standardized name")
+    pheno = pd.read_csv(phenotypes_gz, sep="\t", index_col=0)
+    t = pd.DataFrame({
+        "isolate": s1["Isolate name"],
+        "ploidy": pd.to_numeric(s1["Ploidy"], errors="coerce").astype("Int64"),  # 'Xn' -> unknown
+        "zygosity": s1["Zygosity"],
+        "aneuploidy": s1["Aneuploidies"],
+        "clade": s1["Clades"].astype(str).str.strip(),
+        "ecological_origin": s1["Ecological origins"],
+        "mta_restricted": s1["MTA (no distribution)"].eq("yes"),
+    }).reindex(samples)
+    if t["isolate"].isna().any():
+        raise ValueError(f"strains missing from Table S1: {t.index[t['isolate'].isna()].tolist()[:5]}")
+    t.index.name = "strain"
+    t["has_phenotype"] = t.index.isin(pheno.index)
+    return t
+
+
+def orf_table(pa_columns, pangenome_fasta_gz) -> pd.DataFrame:
+    """Matrix column 'X7051.YOR083W' -> pangenome ORF 7051 -> real name and systematic gene (if any).
+    The number links the R-mangled column to the FASTA header '7051-YOR083W'."""
+    names = {}
+    with gzip.open(pangenome_fasta_gz, "rt") as f:
+        for line in f:
+            if line.startswith(">"):
+                num, name = line[1:].strip().split("-", 1)
+                names[int(num)] = name
+    num = pd.Series(pa_columns).str.extract(r"^X(\d+)\.")[0].astype(int)
+    orf = num.map(names)
+    if orf.isna().any():
+        raise ValueError(f"{orf.isna().sum()} matrix columns have no pangenome ORF")
+    base = orf.str.replace(r"_NumOfGenes_\d+$", "", regex=True)
+    return pd.DataFrame({"column": list(pa_columns), "orf": orf, "family": orf != base,
+                         "gene": base.where(base.str.match(SYSTEMATIC.pattern))})
+
+
+def read_plink_bed(prefix) -> tuple[pd.DataFrame, np.ndarray]:
+    """PLINK 1 SNP-major .bed -> (bim table, int8 sites x samples: alt-allele count 0/1/2, -1 missing)."""
+    bim = pd.read_csv(f"{prefix}.bim", sep=r"\s+", header=None, names=["chrom", "id", "cm", "pos", "a1", "a2"])
+    n = sum(1 for _ in open(f"{prefix}.fam"))
+    raw = np.fromfile(f"{prefix}.bed", dtype=np.uint8)
+    if raw[:3].tolist() != [0x6C, 0x1B, 0x01]:
+        raise ValueError("not a SNP-major PLINK 1 .bed")
+    packed = raw[3:].reshape(len(bim), -1)
+    bits = np.stack([(packed >> s) & 3 for s in (0, 2, 4, 6)], axis=2).reshape(len(bim), -1)[:, :n]
+    # PLINK codes: 0 hom A1, 1 missing, 2 het, 3 hom A2; count A1 copies.
+    lut = np.array([2, -1, 1, 0], dtype=np.int8)
+    return bim, lut[bits]
