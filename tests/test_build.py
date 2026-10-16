@@ -56,3 +56,24 @@ def test_check_inputs_rejects_changed_or_missing_files(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "INPUTS", {"b.txt": "0" * 32})
     with pytest.raises(FileNotFoundError, match="b.txt"):
         build.check_inputs(tmp_path)
+
+
+def test_encode_masks_low_quality_and_haploid_hets():
+    gt = np.array([0, 1, 3, 2, 1, 3, 0])
+    gq = np.array([99, 99, 99, -1, 99, 10, 99])
+    dp = np.array([30, 30, 30, 0, 30, 30, 3])
+    haploid = np.array([0, 0, 0, 0, 1, 0, 0], bool)
+    assert build.encode(gt, gq, dp, haploid).tolist() == [0, 1, 2, -1, -1, -1, -1]
+
+
+def test_site_stats():
+    s = build.site_stats(np.array([0, 1, 2, -1, 2], np.int8))
+    assert (s["ac"], s["an"], s["n_het"], s["n_hom"], s["call_rate"], s["ref_is_minor"]) == (5, 8, 1, 2, 0.8, True)
+
+
+def test_standardised_carriers_filters_rare_and_badly_called():
+    common = np.array([0, 1, 2, 0, 0, 1, 0, 0, 0, 1] * 10, np.int8)
+    z = build.standardised_carriers(common)
+    assert z is not None and np.isclose(z.mean(), 0) and np.isclose(z.std(), 1)
+    assert build.standardised_carriers(np.array([1] + [0] * 99, np.int8)) is None  # 1% carriers
+    assert build.standardised_carriers(np.array([-1] * 10 + [0, 1] * 45, np.int8)) is None  # 90% called

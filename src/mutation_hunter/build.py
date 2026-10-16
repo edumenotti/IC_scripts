@@ -147,3 +147,75 @@ def classify(consequence: str, aa_pos: int, protein_len: int) -> str:
     if "missense" in parts:
         return "missense"
     return "synonymous" if "synonymous" in parts else "other"
+
+
+def encode(gt_types, gq, dp, haploid, min_gq=20, min_dp=5) -> np.ndarray:
+    """cyvcf2 gt_types (0 ref, 1 het, 2 unknown, 3 hom alt) -> int8: -1 missing, 0 ref, 1 het, 2 hom alt.
+    Low GQ/DP and heterozygous calls in haploid strains become missing."""
+    code = np.select([gt_types == 1, gt_types == 3], [1, 2], 0).astype(np.int8)
+    bad = (gt_types == 2) | (gq < min_gq) | (dp < min_dp) | ((gt_types == 1) & haploid)
+    code[bad] = -1
+    return code
+
+
+def site_stats(code: np.ndarray) -> dict:
+    called = code >= 0
+    n_het, n_hom, an = int((code == 1).sum()), int((code == 2).sum()), int(2 * called.sum())
+    ac = n_het + 2 * n_hom
+    return {"ac": ac, "an": an, "n_het": n_het, "n_hom": n_hom, "call_rate": called.mean(),
+            "ref_is_minor": bool(an and ac / an > 0.5)}
+
+
+def standardised_carriers(code: np.ndarray, min_freq=0.05, min_call=0.95) -> np.ndarray | None:
+    """Common-SNP carrier vector standardised for the GRM (missing -> 0, i.e. mean-imputed), or None."""
+    called = code >= 0
+    if called.mean() < min_call:
+        return None
+    f = (code[called] > 0).mean()
+    if not min_freq <= f <= 1 - min_freq:
+        return None
+    return np.where(called, (code > 0) - f, 0.0) / np.sqrt(f * (1 - f))
+
+
+def genotypes(bcf, strains_tsv, gff, out_prefix, min_gq=20, min_dp=5) -> None:
+    """One chromosome: <out>.variants.tsv.gz, <out>.geno.npz (variant rows x strains) and <out>.kin.npz
+    (sum of Z'Z over common SNPs and their count, for the GRM and its LOCO versions)."""
+    from cyvcf2 import VCF
+
+    strains = pd.read_csv(strains_tsv, sep="\t", index_col=0)
+    vcf = VCF(str(bcf), strict_gt=True)
+    if list(vcf.samples) != list(strains.index):
+        raise ValueError("VCF samples and strains.tsv differ in content or order")
+    haploid = (strains["ploidy"] == 1).to_numpy()
+    plen = protein_lengths(gff)
+    rows, mats, block = [], [], []
+    zz, m = np.zeros((len(strains),) * 2), 0
+    for rec in vcf:
+        code = encode(rec.gt_types, rec.gt_quals, rec.format("DP")[:, 0], haploid, min_gq, min_dp)
+        if len(rec.REF) == 1 and len(rec.ALT[0]) == 1 and (z := standardised_carriers(code)) is not None:
+            block.append(z)
+            if len(block) == 2000:
+                Z = np.array(block)
+                zz += Z.T @ Z
+                m += len(block)
+                block = []
+        ann = parse_bcsq(rec.INFO.get("BCSQ") or "")
+        if not ann:
+            continue
+        stats_ = site_stats(code)
+        nz = sparse.csr_matrix(code)
+        for consequence, gene, aa in ann:
+            aa_pos = int(mt[1]) if (mt := re.match(r"(\d+)", aa)) else 0
+            rows.append({"chrom": rec.CHROM, "pos": rec.POS, "ref": rec.REF, "alt": rec.ALT[0],
+                         "old_rec": rec.INFO.get("OLD_REC") or "", "gene": gene, "transcript": gene + "_mRNA",
+                         "consequence": consequence, "class": classify(consequence, aa_pos, plen.get(gene + "_mRNA", 0)),
+                         "aa_change": aa, "aa_pos": aa_pos, "protein_len": plen.get(gene + "_mRNA", 0), **stats_})
+            mats.append(nz)  # ponytail: overlapping genes duplicate the genotype row; fine at yeast scale
+    if block:
+        Z = np.array(block)
+        zz += Z.T @ Z
+        m += len(block)
+    pd.DataFrame(rows, columns=VARIANT_COLUMNS).to_csv(f"{out_prefix}.variants.tsv.gz", sep="\t", index=False)
+    geno = sparse.vstack(mats, format="csr") if mats else sparse.csr_matrix((0, len(strains)), dtype=np.int8)
+    sparse.save_npz(f"{out_prefix}.geno.npz", geno.astype(np.int8))
+    np.savez(f"{out_prefix}.kin.npz", zz=zz, m=m)
